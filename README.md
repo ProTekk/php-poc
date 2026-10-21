@@ -13,6 +13,25 @@ Same reachable surface (the pre-RINIT multipart upload-progress window), three
 different bugs. Companion reports: *PHP-UAF-writeup.pdf* (summary) and
 *PHP-UAF-technical-report.pdf* (mechanisms, paths, evidence ledger).
 
+## Evening update (Oct 21)
+
+`poc/uaf_rce.py` — one-file stdlib CLI, **end-to-end network RCE** on the
+adjacent staleness bug: plant → corrupt (frozen `bytes_processed`
+signature) → app gates its own progress entry → `system(cmd)` dial-back to
+you. Server-side staging: `poc/exploit/app.php` in the docroot, nothing
+else — connect-back address and command ride in-band. Venue: Apache
+mod_php (php -S/php-fpm's RINIT-before-parse is structurally immune to
+cross-request consumption). Verified on remote vanilla 8.3.6 mod_php:
+**5/5 frozen+shell**, `frozen=1 bytes≈205K/516K`, banner `www-data /
+hello-from-uaf / php8.3.6-uaf-revshell-OK`.
+
+`poc/cve2/` — the CVE-only path (no staleness): vendor OOM arm →
+published-state gate → dial-back. `rce_run.py` (armed + control),
+`rce_shell.py` (playground CLI: `--cmd` inline, typing shell by default,
+`--no-arm` control). Caveat kept honest: the CVE-only gate keys on the
+harness-observed silent 500 (marker file); engine-level forged dispatch
+remains open (0/21 armed trials segfaulted — LIFO self-reclaim hides it).
+
 ## Requirements
 
 - `php-cli` — unpatched build (tested: distro **8.3.6**, Oct 2026 build; bug reachable
