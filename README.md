@@ -32,6 +32,16 @@ published-state gate → dial-back. `rce_run.py` (armed + control),
 harness-observed silent 500 (marker file); engine-level forged dispatch
 remains open (0/21 armed trials segfaulted — LIFO self-reclaim hides it).
 
+`poc/uaf_rce.py` v2 modes: default one-shot = **real pty shell** (python3
+`pty.spawn` target-side, raw-mode client — Ctrl-C/job control work; auto-
+falls back to `--plain` sh -i if python3 absent). `--up FILE` uploads to
+`/tmp/uaf_NAME` riding R1's multipart (md5-verified on venue; ceiling =
+upload_max_filesize) + `--run` exec. `--serve [F]` runs an attacker-side
+http server (embedded `uaf_shell.py` default) so the target downloads and
+execs its shell — the initcmd pattern for python-less targets. `--cmd`/
+`--n` keep banner mode. Quoting lesson baked in: nothing backslashed may
+reach `python -c`'s parser — escapeshellarg passes backslashes literally.
+
 ## Requirements
 
 - `php-cli` — unpatched build (tested: distro **8.3.6**, Oct 2026 build; bug reachable
