@@ -1,0 +1,86 @@
+# php2shell_detect — benign client-testing detector for PHP2Shell
+
+One PHP file (+ one Python runner) that answers: **is this target's PHP in
+the vulnerable lineage for CVE-2026-109618 / CVE-2026-109619, is the door
+config-open, and — when run with `--probe` — does the build actually behave
+like a patched one?** No exploit, no writes outside session files, no root,
+no external binaries. Runs on Linux, macOS, and Windows.
+
+## The ladder
+
+1. **Version lineage** — `PHP_VERSION` vs the vendor fix floors
+   (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12; GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp).
+   5.4–8.1 = `VULN-EOL` (in range, source-only backports, no patched binaries
+   ever shipped). < 5.4 = `NO-TRIGGER` (no upload_progress).
+2. **Config gate** — `session.upload_progress.enabled` (compiled default: ON).
+   Off = the demonstrated rfc1867 door is closed by config (patch still required:
+   the general-decode refcount class is flag-independent).
+3. **Behavioral probe** (`detect.py --probe`) — the vendor's shipped regression
+   shape: one oversized form-urlencoded POST forces a parse-phase memory_limit
+   fatal. **Unpatched lineage: silent 500 / connection closed mid-upload.
+   Patched lineage: 200 + visible "Allowed memory size … exhausted"** (the
+   vendor's deferred-OOM symptom). Build-agnostic — this is the check that
+   sees through distro backports (RHEL/Amazon/Ubuntu SRU patch without
+   bumping the version string, which makes the version tier lie).
+
+The probe outranks the version tier whenever they disagree; the final
+`DETECT-VERDICT` line says which one confirmed.
+
+## Usage
+
+    # check the PHP on this box (CLI) — exit code IS the verdict
+    php poc/detect/php2shell_detect.php
+    python3 poc/detect/detect.py                 # same, plus distro pkg notes
+
+    # check a live web venue: deploy the .php to a docroot, then
+    python3 poc/detect/detect.py --url http://host[:port]/php2shell_detect.php --probe
+
+Exit codes (runner and CLI detector agree): 0 fixed/not-affected,
+2 vulnerable, 3 inconclusive/unknown, 4 unreachable/bad usage.
+
+## Windows
+
+- **CLI:** `detect.cmd` (needs `php` on PATH). Exit code → `%ERRORLEVEL%`.
+- **Live venue (IIS or Apache):** drop `php2shell_detect.php` into the site
+  root, then `py -3 detect.py --url http://localhost/php2shell_detect.php --probe`.
+  No POSIX deps anywhere in either file (no pcntl/posix, no shelling out).
+- PHP on IIS is typically ZTS (`php8ts.dll`, FastCGI or ISAPI): the detector
+  reports `zts=1` and `sapi=…`. Per-worker staleness semantics are identical
+  (globals are per-thread/per-process either way).
+- **Probe honesty on Windows/FastCGI:** a bailout may end the FastCGI worker
+  (`php-cgi.exe` respawn) — the canary line reports `pid_before ≠ pid_after`
+  as a benign, vuln-consistent churn note. Windows version checks are *more*
+  trustworthy than Linux ones (php.net/Zend builds carry no silent backport
+  patching), so lineage-only mode is a fair default there.
+
+## Probe benignity budget
+
+- One POST body ≈ 1.5× the venue's `memory_limit` (+1MB), default cap 48MB
+  (`--arm-cap`). One request; worst case a worker bounce on FPM/cgi.
+- Skips honestly and says why: `memory_limit=-1` (unbounded arm isn't
+  benign) or `post_max_size` below the limit (truncation neuters the arm —
+  raising it is a config change, not a probe).
+- Canary requests are ~1KB. Session files land in the venue's save_path only.
+
+## Verified venues (2026-10-26)
+
+| venue | PHP | static | probe | final |
+|---|---|---|---|---|
+| local CLI (Ubuntu 24.04 stock) | 8.3.6 | VULN | n/a | VULN (exit 2) |
+| local CLI (source build) | 8.3.36 | FIXED | n/a | FIXED (exit 0) |
+| local CLI (source build) | 8.5.12 | FIXED | n/a | FIXED (exit 0) |
+| bench php -S, 8M limit | 8.3.6 | VULN | silent 500 = VULN-SIG | VULN probe-confirmed |
+| bench php -S, 8M limit | 8.3.36 | FIXED | 200+exhausted = FIXED-SIG | FIXED probe-confirmed |
+| .170 Apache prefork :18990 | 8.3.6 SRU | VULN | silent 500, worker stable | VULN probe-confirmed |
+| .16 Apache prefork (src-build) | 8.5.12 | FIXED | skipped (post 8M < mem 128M) | FIXED lineage-only |
+
+Windows itself was not a test venue this round (no Windows box on the LAN) —
+support there is by construction (no POSIX deps, exit-code contract, IIS
+notes above) plus one measured pitfall fixed: `PHP_ZTS` is defined on NTS
+builds too; its *value* is the thread-safety flag.
+
+## Scope note
+
+This detects the **CVE pair's lineage**. The uncatalogued frozen-counter
+staleness (survives the vendor fix, byte-identical on 8.3.36/8.5.12) is a
+different finding with its own chain — see `../exploit/` and the writeup.
