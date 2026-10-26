@@ -55,13 +55,16 @@ unreachable/bad usage. So a fully CVE-patched box running our chain (e.g.
 ## Usage
 
     # check the PHP on this box (CLI) — exit code IS the verdict
-    php poc/detect/php2shell_detect.php
-    python3 poc/detect/detect.py                 # same, plus distro pkg notes
+    php poc/detect/php2shell_detect.php          # machine line, exit code verdict
+    python3 poc/detect/detect.py                 # human report + detail log
 
     # check a live web venue: deploy the .php to a docroot, then
     python3 poc/detect/detect.py --url http://host[:port]/php2shell_detect.php --probe
 
-Exit codes: see the contract above — chain ARMED alone is a finding (exit 2).
+The runner prints a short human report (RESULT headline + two or three plain
+lines) and writes every machine-parseable pipe-format line to a detail log
+(`./php2shell-detect-<target>.log`, override with `--log`, or use `--raw` to
+get the pipe lines on stdout with no log — that's the legacy scripting mode).
 
 ## Windows
 
