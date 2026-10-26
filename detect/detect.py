@@ -17,6 +17,30 @@ DET  = os.path.join(HERE, 'php2shell_detect.php')
 
 MLINES = []          # machine-channel lines -> log file
 RAW = False          # --raw: machine lines straight to stdout, no log
+USE_COLOR = False    # resolved in main() from tty/flags/env
+
+def init_color(args, stream):
+    """ANSI color if: --color forced, or (stdout is a tty and NO_COLOR unset
+    and TERM is not dumb). --nocolor kills it. Windows 10+ consoles get VT
+    mode via the os.system('') bootstrap."""
+    global USE_COLOR
+    if args.nocolor:
+        USE_COLOR = False
+    elif args.color:
+        USE_COLOR = True
+    else:
+        USE_COLOR = (stream.isatty()
+                     and not os.environ.get('NO_COLOR')
+                     and os.environ.get('TERM') != 'dumb')
+    if USE_COLOR and os.name == 'nt':
+        os.system('')   # enable ANSI VT processing on Windows consoles
+
+def c(s, col):
+    return ('\033[%sm' % col) + s + '\033[0m' if USE_COLOR else s
+
+# classic 16-color slots: 31 red, 32 green, 33 yellow, 36 cyan, 90 bright-black (dim)
+RED, GRN, YEL, CYA, DIM = '31', '32', '33', '36', '90'
+BRED, BGRN, BYEL, BCYA, BOLD = '1;31', '1;32', '1;33', '1;36', '1'
 
 def ml(msg):
     """Emit one machine line (pipe-formatted)."""
@@ -208,7 +232,8 @@ def probe(fields, host, port, path, ssl, args):
            'VULN-SIG': 'unpatched behavior observed (silent 500 / dropped connection under memory pressure)',
            'ARM-MISSED': 'arm did not trigger a memory-limit condition (body under venue limits)',
            'UNKNOWN': 'probe result ambiguous — see log'}
-    human('  probe: %s' % hum.get(sig, sig))
+    pcol = {'VULN-SIG': RED, 'FIXED-SIG': GRN}.get(sig, YEL)
+    human('  %s' % c('probe: ' + hum.get(sig, sig), pcol))
     return sig
 
 def pubstate(fields, host, port, path, ssl, args):
@@ -218,7 +243,7 @@ def pubstate(fields, host, port, path, ssl, args):
     entry), then one same-sid read-back GET. Reports whether the upload-progress
     entry gets published: the precondition our stock-config lever runs on."""
     if fields.get('up_en') in ('0', "'0'", 'false', 'False'):
-        ml('CHAIN|skipped|upload_progress disabled'); human('  chain: upload_progress is disabled — lever door closed by config'); return 'IDLE'
+        ml('CHAIN|skipped|upload_progress disabled'); human('  %s' % c('chain: upload_progress is disabled — lever door closed by config', DIM)); return 'IDLE'
     name = fields.get('up_name') or 'PHP_SESSION_UPLOAD_PROGRESS'
     if name == 'unset': name = 'PHP_SESSION_UPLOAD_PROGRESS'
     sid = 'detectpspbstate%013d' % (os.getpid() % 10**13)   # [0-9a-v] only, 8.3 sid vetting
@@ -315,9 +340,12 @@ def main():
     ap.add_argument('--php-bin', default=None, help='php binary for local mode')
     ap.add_argument('--log', default=None, help='detail log path (default ./php2shell-detect-<target>.log)')
     ap.add_argument('--raw', action='store_true', help='machine pipe-format to stdout, no log file')
+    ap.add_argument('--color', action='store_true', help='force ANSI color even when piped')
+    ap.add_argument('--nocolor', action='store_true', help='disable color (also honors NO_COLOR env)')
     ap.add_argument('--timeout', type=int, default=60)
     args = ap.parse_args()
     RAW = args.raw
+    init_color(args, sys.stdout)
 
     host = port = path = ssl = None
     if args.url:
@@ -368,42 +396,61 @@ def main():
     # ---- human report ----
     target = args.url if args.url else 'local PHP %s (%s)' % (fields.get('v', '?'), fields.get('sapi', '?'))
     if armed and cve_bad:
-        headline = 'VULNERABLE — CVE pair unpatched AND our exploit chain is armed'
+        vword, vtail = 'VULNERABLE', 'CVE pair unpatched AND our exploit chain is armed'
     elif armed:
-        headline = 'VULNERABLE — our exploit chain is armed (vendor CVE pair is patched)'
+        vword, vtail = 'VULNERABLE', 'our exploit chain is armed (vendor CVE pair is patched)'
     elif cve_bad:
-        headline = 'VULNERABLE — CVE pair unpatched' + (' (chain: likely)' if likely else '')
+        vword, vtail = 'VULNERABLE', 'CVE pair unpatched' + (' — chain likely' if likely else '')
     elif final == 'FIXED' and likely:
-        headline = 'LIKELY — CVE pair patched; chain door open but not directly observable (stock cleanup regime)'
+        vword, vtail = 'LIKELY', 'CVE pair patched; chain door open but not directly observable (stock cleanup regime)'
     elif final == 'FIXED':
-        headline = 'NOT VULNERABLE' + (' — upload_progress disabled' if up_off else '')
+        vword, vtail = 'NOT VULNERABLE', ('upload_progress disables the demonstrated door' if up_off else 'CVE pair patched, chain idle')
     elif final == 'NO-TRIGGER':
-        headline = 'NOT AFFECTED — no upload-progress machinery (PHP < 5.4)'
+        vword, vtail = 'NOT AFFECTED', 'no upload-progress machinery (PHP < 5.4)'
     else:
-        headline = 'INCONCLUSIVE — see details'
-    print('\nRESULT: %s' % headline)
-    print('  checked: %s' % target)
+        vword, vtail = 'INCONCLUSIVE', 'see details below and in the log'
+    vw_col = {'VULNERABLE': BRED, 'LIKELY': BYEL, 'NOT VULNERABLE': BGRN,
+              'NOT AFFECTED': BGRN, 'INCONCLUSIVE': BCYA}[vword]
+
+    def lab(s):
+        return c(s, BOLD)
+
+    def tag(text, col):
+        return c('[ %s ]' % text, col)
+
+    print('')
+    print('%s %s' % (c('◆ PHP2Shell', BCYA), c(target, BOLD)))
+    print('%s %s' % (lab('  VERDICT  '), c(vword, vw_col) + ' — ' + vtail))
+    cve_tag = {'VULN': tag('UNPATCHED', RED), 'VULN-EOL': tag('UNPATCHED · EOL', RED),
+               'FIXED': tag('PATCHED', GRN), 'NO-TRIGGER': tag('N/A', GRN),
+               'UNKNOWN': tag('UNKNOWN', YEL)}[verdict]
     floor = fields.get('floor', '')
     hum_cve = {'VULN': 'PHP %s predates the fix (floor %s)' % (fields.get('v', '?'), floor),
                'VULN-EOL': 'PHP %s — end-of-life line, never patched in binaries' % fields.get('v', '?'),
                'FIXED': 'PHP %s is at/above the fix%s' % (fields.get('v', '?'), (' (%s)' % floor) if floor else ''),
                'NO-TRIGGER': 'PHP %s predates upload_progress (5.4)' % fields.get('v', '?'),
                'UNKNOWN': 'PHP branch not in the fix table'}
-    human('  CVE pair: %s%s' % (hum_cve.get(verdict, verdict),
-          '' if psig in (None, 'SKIPPED', 'not-run') else
-          ' — probe says: %s' % ('unpatched behavior' if psig == 'VULN-SIG' else 'patched behavior' if psig == 'FIXED-SIG' else 'inconclusive')))
-    hum_chain = {'ARMED': 'armed — the progress entry published live on this venue',
-                 'LIKELY': 'likely — door open, but the stock cleanup regime hides the entry from detection',
-                 'IDLE': 'idle — lever door closed on this venue'}
-    if chain: human('  our chain: %s' % hum_chain.get(chain, chain))
-    if fields.get('ini') == 'none': human('  note: no php.ini loaded (vendor-strictest defaults)')
-    if up_off: human('  note: upload_progress disabled — demonstrated door closed; patch still recommended')
+    psig_txt = ('' if psig in (None, 'SKIPPED', 'not-run')
+                else ' — probe: %s' % c({'VULN-SIG': 'unpatched behavior', 'FIXED-SIG': 'patched behavior'}.get(psig, 'inconclusive'),
+                                        RED if psig == 'VULN-SIG' else GRN if psig == 'FIXED-SIG' else YEL))
+    print('%s %s' % (lab('  CVE pair '), cve_tag + ' ' + hum_cve[verdict] + psig_txt))
+    hum_chain = {'ARMED': (tag('ARMED', RED), 'the progress entry published live on this venue'),
+                 'LIKELY': (tag('LIKELY', YEL), 'door open, but the stock cleanup regime hides the entry from detection'),
+                 'IDLE': (tag('IDLE', GRN), 'lever door closed on this venue')}
+    if chain:
+        ct, cc = hum_chain[chain]
+        print('%s %s' % (lab('  Our chain'), ct + ' ' + cc))
+    extras = []
+    if fields.get('ini') == 'none': extras.append('no php.ini loaded (vendor-strictest defaults)')
+    if up_off: extras.append('upload_progress disabled — demonstrated door closed; patch still recommended')
+    for e in extras:
+        print('  %s' % c('note: ' + e, DIM))
 
     logpath = write_log(args, host)
     if logpath:
-        print('  details: %s' % logpath)
+        print('%s %s' % (lab('  details  '), c(logpath, DIM)))
     elif not RAW and MLINES:
-        print('  (could not write the detail log)')
+        print('  %s' % c('(could not write the detail log)', DIM))
 
     if armed or cve_bad: return 2
     if final == 'INCONCLUSIVE': return 3
