@@ -1,8 +1,24 @@
 # PHP session.upload_progress — repro & PoC bundle
 
-**Latest (Oct 26, 2026).** Repo public. The pubstate staleness chain is proven
-3/3 on patched-latest **PHP 8.5.12** on both SAPIs (Apache prefork mod_php and
-stock `php:8.5.12-fpm`); details in *Oct 26 update* below. Original status follows.
+## Oct 26 update (patched-latest, both SAPIs)
+
+**mod_php:** on the source-built 8.5.12 venue box (Apache 2.4.69 prefork,
+tuned ini `cleanup=0`, live WordPress/MediaWiki alongside), `stock_rce.py`
+**3/3** — pubstate gate, dial-back shell as `daemon`, banner-verified.
+
+**FPM:** `stock_rce.py` **3/3 on `php:8.5.12-fpm` behind nginx** — official image, *no
+php.ini at all*, stock `cleanup=1`: dial-back RCE as `www-data`, `PUBSTATE=1
+RC=0`, banner-verified 8.5.12 NTS. The vendor's advisories demonstrated their
+exploits on mod_php; **no complete exploit had been demonstrated against FPM** —
+as of 2026-10-26, there's one, and it needs neither the OOM spray nor
+offsets. The SAPI nuance (in-flight frozen counter `frozen=YES` on patched FPM;
+the cross-request abandoned-upload artifact is prefork-native and on FPM wants
+`cleanup=0`) and the full receipts: `forensics/fpm-8512-2026-10-26.md`.
+Forward paths (distro tail / staleness-as-primitive / next venue):
+`forensics/paths-2026-10-26.md`. Staleness report remains **unfiled by owner's
+choice** — public repo, open credit.
+
+## Status (Oct 21, 2026)
 
 **Status (Oct 21, 2026).** The two shipped CVEs — **CVE-2026-109618** (RCE via OOM
 corruption: allocation failure during request parsing leaves memory half-initialized;
@@ -26,7 +42,7 @@ you. Server-side staging: `poc/exploit/app.php` in the docroot, nothing
 else — connect-back address and command ride in-band. Venue: Apache
 mod_php. (php-fpm's RINIT-before-parse is structurally immune to the
 *cross-request consumption* leg specifically — not to the chain's
-pubstate gate, which runs on FPM too; see the Oct 26 update.) Verified
+pubstate gate, which runs on FPM too; see the Oct 26 section above.) Verified
 on remote vanilla 8.3.6 mod_php:
 **5/5 frozen+shell**, `frozen=1 bytes≈205K/516K`, banner `www-data /
 hello-from-uaf / php8.3.6-uaf-revshell-OK`.
@@ -132,24 +148,6 @@ setarch -R php -S 0.0.0.0:18881 \
   -d session.use_only_cookies=0 -d session.use_strict_mode=0 \
   -d session.save_path=/tmp/sess -d post_max_size=64M exploit/app.php
 ```
-
-## Oct 26 update (patched-latest, both SAPIs)
-
-**mod_php:** on the source-built 8.5.12 venue box (Apache 2.4.69 prefork,
-tuned ini `cleanup=0`, live WordPress/MediaWiki alongside), `stock_rce.py`
-**3/3** — pubstate gate, dial-back shell as `daemon`, banner-verified.
-
-**FPM:** `stock_rce.py` **3/3 on `php:8.5.12-fpm` behind nginx** — official image, *no
-php.ini at all*, stock `cleanup=1`: dial-back RCE as `www-data`, `PUBSTATE=1
-RC=0`, banner-verified 8.5.12 NTS. The vendor's advisories demonstrated their
-exploits on mod_php; **no complete exploit had been demonstrated against FPM** —
-as of 2026-10-26, there's one, and it needs neither the OOM spray nor
-offsets. The SAPI nuance (in-flight frozen counter `frozen=YES` on patched FPM;
-the cross-request abandoned-upload artifact is prefork-native and on FPM wants
-`cleanup=0`) and the full receipts: `forensics/fpm-8512-2026-10-26.md`.
-Forward paths (distro tail / staleness-as-primitive / next venue):
-`forensics/paths-2026-10-26.md`. Staleness report remains **unfiled by owner's
-choice** — public repo, open credit.
 
 ## Caveats worth reading before sharing further
 
