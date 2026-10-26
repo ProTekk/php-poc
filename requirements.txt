@@ -1,0 +1,21 @@
+# PHP session upload-progress PoC suite — PHP2Shell
+# CVE-2026-109618 / CVE-2026-109619
+#
+# The client detector (poc/detect/detect.php + detect.py) and every PoC driver
+# in this repo run on the Python 3 STANDARD LIBRARY ONLY. There is nothing to
+# pip-install; this file exists so that
+#
+#     pip install -r requirements.txt
+#
+# is a clean no-op instead of a missing-file error, and to pin the floor:
+#
+#     Python >= 3.7      (subprocess.run(capture_output=True) in detect.py)
+#
+# Optional, never required:
+#     colorama           — only for legacy pre-Windows-10 consoles that lack
+#                          ANSI VT escape handling. Windows 10+ terminals and
+#                          Windows Terminal get color via the stdlib bootstrap
+#                          in detect.py; Linux/macOS terminals need nothing.
+#
+# If pip does install anything from this file in the future, pin it with ==.
+colorama>=0.4; platform_system=="Windows" and python_version<"3.8"
