@@ -1,5 +1,9 @@
 # PHP session.upload_progress — repro & PoC bundle
 
+**Latest (Oct 26, 2026).** Repo public. The pubstate staleness chain is proven
+3/3 on patched-latest **PHP 8.5.12** on both SAPIs (Apache prefork mod_php and
+stock `php:8.5.12-fpm`); details in *Oct 26 update* below. Original status follows.
+
 **Status (Oct 21, 2026).** The two shipped CVEs — **CVE-2026-109618** (RCE via OOM
 corruption: allocation failure during request parsing leaves memory half-initialized;
 request shutdown reads it) and **CVE-2026-109619** (RCE via stale global state: worker
@@ -20,8 +24,10 @@ adjacent staleness bug: plant → corrupt (frozen `bytes_processed`
 signature) → app gates its own progress entry → `system(cmd)` dial-back to
 you. Server-side staging: `poc/exploit/app.php` in the docroot, nothing
 else — connect-back address and command ride in-band. Venue: Apache
-mod_php (php -S/php-fpm's RINIT-before-parse is structurally immune to
-cross-request consumption). Verified on remote vanilla 8.3.6 mod_php:
+mod_php. (php-fpm's RINIT-before-parse is structurally immune to the
+*cross-request consumption* leg specifically — not to the chain's
+pubstate gate, which runs on FPM too; see the Oct 26 update.) Verified
+on remote vanilla 8.3.6 mod_php:
 **5/5 frozen+shell**, `frozen=1 bytes≈205K/516K`, banner `www-data /
 hello-from-uaf / php8.3.6-uaf-revshell-OK`.
 
@@ -56,6 +62,9 @@ reach `python -c`'s parser — escapeshellarg passes backslashes literally.
 poc/forensics/   run.sh            the frozen-counter repro (~10s)
 poc/exploit/     run_exploit.sh    the staleness exploit chain
 poc/cve/         cve_driver.py     CVE trigger + patch-signature driver
+stock_rce.py     the pubstate staleness chain — stock config, mod_php + FPM venues
+php2shell.py     distro-tail census: --wp consumer-app probe mode (paced plant,
+                 progress-name cycling, HTTP verdicts); AIO probe+arm+lever
 ```
 
 ```bash
@@ -124,13 +133,17 @@ setarch -R php -S 0.0.0.0:18881 \
   -d session.save_path=/tmp/sess -d post_max_size=64M exploit/app.php
 ```
 
-## Oct 26 update (FPM, patched-latest)
+## Oct 26 update (patched-latest, both SAPIs)
 
-`stock_rce.py` **3/3 on `php:8.5.12-fpm` behind nginx** — official image, *no
+**mod_php:** on the source-built 8.5.12 venue box (Apache 2.4.69 prefork,
+tuned ini `cleanup=0`, live WordPress/MediaWiki alongside), `stock_rce.py`
+**3/3** — pubstate gate, dial-back shell as `daemon`, banner-verified.
+
+**FPM:** `stock_rce.py` **3/3 on `php:8.5.12-fpm` behind nginx** — official image, *no
 php.ini at all*, stock `cleanup=1`: dial-back RCE as `www-data`, `PUBSTATE=1
 RC=0`, banner-verified 8.5.12 NTS. The vendor's advisories demonstrated their
 exploits on mod_php; **no complete exploit had been demonstrated against FPM** —
-as of 2026-10-26 00:3x EDT, there's one, and it needs neither the OOM spray nor
+as of 2026-10-26, there's one, and it needs neither the OOM spray nor
 offsets. The SAPI nuance (in-flight frozen counter `frozen=YES` on patched FPM;
 the cross-request abandoned-upload artifact is prefork-native and on FPM wants
 `cleanup=0`) and the full receipts: `forensics/fpm-8512-2026-10-26.md`.
@@ -140,8 +153,11 @@ choice** — public repo, open credit.
 
 ## Caveats worth reading before sharing further
 
-- The staleness bug has **no bug report filed** with the PHP security team yet —
-  file it before circulating operational exploit details widely.
+- The staleness bug has **no bug report filed** with the PHP security team —
+  by owner's choice, not oversight: the repo went public 2026-10-26 (chain,
+  receipts, repro commands all in the open). Whoever wants to file the
+  staleness report is welcome to; prior art is this repo's timestamp (first
+  commit 2026-10-21, docs drafted 00:07 EDT).
 - `memory_limit=-1` mitigates only the **limit-driven** 618 path; other allocation
   failures remain reachable. Updating PHP is the only complete mitigation.
 - Patched-version reality: releases for 8.2–8.5; **source-only** backport branches
