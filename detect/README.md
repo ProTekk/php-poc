@@ -22,9 +22,35 @@ no external binaries. Runs on Linux, macOS, and Windows.
    vendor's deferred-OOM symptom). Build-agnostic — this is the check that
    sees through distro backports (RHEL/Amazon/Ubuntu SRU patch without
    bumping the version string, which makes the version tier lie).
+4. **Chain tier** (runs by default on `--url`; `--no-chain` to skip) —
+   "is this venue vulnerable to *our* exploit, not just the CVEs?" One paced
+   ~1.3KB multipart POST carrying the configured progress field, sid in the
+   cookie, body dribbled over ~1.35s of flight, then one ~1KB read-back GET
+   on the same sid. Verdicts:
+   - `chain=ARMED` — the upload-progress entry was observed published in the
+     session: the stock-config lever precondition (the window our pubstate
+     chain and staleness chain run in) is live on this venue, production
+     config, no ini changes. This is the "vulnerable to our exploit" signal.
+   - `chain=LIKELY` — `upload_progress` is enabled and the venue accepts the
+     plant, but the venue's stock `cleanup=1` regime erases the entry inside
+     the parse window (measured behavior on stock builds), so the precondition
+     is door-open-but-unobservable. Treated as chain-capable; does not flip
+     the exit code by itself.
+   - `chain=IDLE` — cleanup=0 regime, every observable chance given, no
+     entry: the lever door is honestly closed on this venue.
+   Arm-shape pitfalls (measured building this): a sub-second upload publishes
+   nothing (`min_freq` default is 1 **second**), and the stock rfc1867 path
+   only engages on a **known Content-Length** — chunked POSTs don't open the
+   door on unpatched builds. So: paced, Content-Length, ~1.35s.
 
 The probe outranks the version tier whenever they disagree; the final
 `DETECT-VERDICT` line says which one confirmed.
+
+**Exit codes** (runner and CLI detector agree): 0 no findings, 2 vulnerable —
+CVE-lineage VULN **or** chain ARMED, 3 inconclusive/unknown, 4
+unreachable/bad usage. So a fully CVE-patched box running our chain (e.g.
+8.5.12 with cleanup=0) exits 2 on the chain signal alone — that's the
+"vulnerable to our exploit too" contract.
 
 ## Usage
 
@@ -35,8 +61,7 @@ The probe outranks the version tier whenever they disagree; the final
     # check a live web venue: deploy the .php to a docroot, then
     python3 poc/detect/detect.py --url http://host[:port]/php2shell_detect.php --probe
 
-Exit codes (runner and CLI detector agree): 0 fixed/not-affected,
-2 vulnerable, 3 inconclusive/unknown, 4 unreachable/bad usage.
+Exit codes: see the contract above — chain ARMED alone is a finding (exit 2).
 
 ## Windows
 
@@ -64,15 +89,15 @@ Exit codes (runner and CLI detector agree): 0 fixed/not-affected,
 
 ## Verified venues (2026-10-26)
 
-| venue | PHP | static | probe | final |
-|---|---|---|---|---|
-| local CLI (Ubuntu 24.04 stock) | 8.3.6 | VULN | n/a | VULN (exit 2) |
-| local CLI (source build) | 8.3.36 | FIXED | n/a | FIXED (exit 0) |
-| local CLI (source build) | 8.5.12 | FIXED | n/a | FIXED (exit 0) |
-| bench php -S, 8M limit | 8.3.6 | VULN | silent 500 = VULN-SIG | VULN probe-confirmed |
-| bench php -S, 8M limit | 8.3.36 | FIXED | 200+exhausted = FIXED-SIG | FIXED probe-confirmed |
-| .170 Apache prefork :18990 | 8.3.6 SRU | VULN | silent 500, worker stable | VULN probe-confirmed |
-| .16 Apache prefork (src-build) | 8.5.12 | FIXED | skipped (post 8M < mem 128M) | FIXED lineage-only |
+| venue | PHP | static | probe | chain | final |
+|---|---|---|---|---|---|
+| local CLI (Ubuntu 24.04 stock) | 8.3.6 | VULN | n/a | n/a | VULN (exit 2) |
+| local CLI (source build) | 8.3.36 | FIXED | n/a | n/a | FIXED (exit 0) |
+| local CLI (source build) | 8.5.12 | FIXED | n/a | n/a | FIXED (exit 0) |
+| bench php -S, 8M limit | 8.3.6 | VULN | silent 500 = VULN-SIG | LIKELY (cleanup=1) | VULN probe-confirmed |
+| bench php -S, 8M limit | 8.3.36 | FIXED | 200+exhausted = FIXED-SIG | LIKELY (cleanup=1) | FIXED probe-confirmed |
+| .170 Apache prefork :18990 | 8.3.6 SRU | VULN | silent 500, worker stable | LIKELY (cleanup=1) | VULN probe-confirmed |
+| .16 Apache prefork (src-build) | 8.5.12 | FIXED | skipped (post 8M < mem 128M) | **ARMED** (cleanup=0, entry observed) | chain finding, exit 2 |
 
 Windows itself was not a test venue this round (no Windows box on the LAN) —
 support there is by construction (no POSIX deps, exit-code contract, IIS
@@ -81,6 +106,11 @@ builds too; its *value* is the thread-safety flag.
 
 ## Scope note
 
-This detects the **CVE pair's lineage**. The uncatalogued frozen-counter
-staleness (survives the vendor fix, byte-identical on 8.3.36/8.5.12) is a
-different finding with its own chain — see `../exploit/` and the writeup.
+The CVE tiers detect the **CVE pair's lineage**; the chain tier detects
+whether **our lever's precondition** is live on the venue's production config.
+They answer different questions and both belong in the client report: a
+vendor-patched box can be (and our .16 is) chain-capable — the uncatalogued
+frozen-counter staleness survives the vendor fix byte-identically on
+8.3.36/8.5.12. Frozen-counter *forensics* additionally want cleanup=0; the
+chain tier flags when the venue's cleanup regime makes the entry unobservable
+(LIKELY) instead of pretending the door is shut.

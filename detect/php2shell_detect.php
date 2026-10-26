@@ -87,6 +87,59 @@ if (isset($_GET['arm']) && $method === 'POST') {
     $out[] = 'ARM|method=GET|mem=' . ini_get('memory_limit');
 }
 
+// ---- chain tier: pubstate lever precondition --------------------------
+// The stock-config lever our chains run on (proven 3/3 stock .170, 5/5
+// operator, survives vendor patches and stock cleanup=1): a request that
+// carries the upload-progress field publishes its progress entry into the
+// session DURING the request; an app with an exec-capable sink runs from
+// that window. We detect the precondition, not the sink (sink is app-specific).
+// POST body shape is the proven R3: progress field first + ~1KB file part,
+// sid in the PHPSESSID cookie.
+if (isset($_GET['pubstate'])) {
+    $cl = isset($_SERVER['CONTENT_LENGTH']) ? (int)$_SERVER['CONTENT_LENGTH'] : 0;
+    // Scan the parse window's live globals FIRST: on unpatched builds the
+    // rfc1867 machinery already initialized the session during parse, and a
+    // stock cleanup=1 would erase the entry when app-side session_start()
+    // decodes — so the pre-start read is the one that sees stock-venue truth.
+    $keys = array();
+    $pre = (isset($GLOBALS['_SESSION']) && is_array($GLOBALS['_SESSION'])) ? $GLOBALS['_SESSION'] : array();
+    foreach (array_keys($pre) as $k) {
+        if (strpos($k, 'upload_progress_') === 0) { $keys[] = substr($k, 16); }
+    }
+    $pre_had = !empty($keys) ? 1 : 0;
+    if (session_status() == PHP_SESSION_NONE) { @session_start(); }  // app-side, as the lever does
+    if (isset($_SESSION) && is_array($_SESSION)) {
+        foreach (array_keys($_SESSION) as $k) {
+            if (strpos($k, 'upload_progress_') === 0 && !in_array(substr($k, 16), $keys, true)) {
+                $keys[] = substr($k, 16);
+            }
+        }
+    }
+    // Gate = the published entry itself. (The proven lever app also checked
+    // CONTENT_LENGTH>0 as a window indicator; chunked-encoding POSTs carry no
+    // Content-Length header, so entry presence is the portable predicate —
+    // it can only be true during a request whose upload the handler tracked.)
+    $gate = (!empty($keys)) ? 1 : 0;
+    $out[] = 'PUBSTATE|cl=' . $cl . '|pre=' . $pre_had . '|entry=' . ($keys ? implode(',', $keys) : 'none')
+           . '|sess=' . session_status() . '|gate=' . $gate;
+}
+
+// Read-back arm (pairs with the pubstate POST one request earlier, same sid):
+// unpatched mod_php venues wipe the parse-window session globals at
+// request-start, so the entry is only observable via its session file — the
+// WP-oracle pattern (entry survives to the file under cleanup=0).
+if (isset($_GET['readstate'])) {
+    if (session_status() == PHP_SESSION_NONE) { @session_start(); }
+    $keys2 = array();
+    if (isset($_SESSION) && is_array($_SESSION)) {
+        foreach (array_keys($_SESSION) as $k) {
+            if (strpos($k, 'upload_progress_') === 0) { $keys2[] = substr($k, 16); }
+        }
+    }
+    $out[] = 'READSTATE|entry=' . ($keys2 ? implode(',', $keys2) : 'none')
+           . '|sess=' . session_status() . '|gate=' . (!empty($keys2) ? 1 : 0);
+}
+
 if (isset($_GET['canary'])) {
     // Vendor canary (sapi/cli/tests/oom_*_next_request shape): class-entry
     // machinery + a raised warning, read on a follow-up request to the same

@@ -12,7 +12,7 @@ Modes:
 Exit codes: 0 fixed/mitigated, 2 vulnerable, 3 inconclusive, 4 unreachable/bad usage.
 stdlib only; runs on Windows (py -3 detect.py) as well as Linux.
 """
-import argparse, json, os, re, shutil, socket, subprocess, sys
+import argparse, json, os, re, shutil, socket, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DET  = os.path.join(HERE, 'php2shell_detect.php')
@@ -47,7 +47,7 @@ def parse_detect(text):
             extras.append(l)
     return fields, extras
 
-def http_req(host, port, qs, body=b'', ctype=None, timeout=90, ssl=False):
+def http_req(host, port, qs, body=b'', ctype=None, timeout=90, ssl=False, cookie=None):
     """One HTTP/1.1 request over a fresh socket (proven cve_driver pattern:
     origin-form target must start with '/'; mid-upload abort IS a signature)."""
     ctx = None
@@ -57,11 +57,12 @@ def http_req(host, port, qs, body=b'', ctype=None, timeout=90, ssl=False):
     s = socket.create_connection((host, port), timeout=timeout)
     if ctx: s = ctx.wrap_socket(s, server_hostname=host)
     tgt = qs if qs.startswith('/') else '/' + qs
+    ck = 'Cookie: %s\r\n' % cookie if cookie else ''
     if body == b'':
-        head = "GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n" % tgt
+        head = "GET %s HTTP/1.1\r\nHost: x\r\n%sConnection: close\r\n\r\n" % (tgt, ck)
     else:
-        head = ("POST %s HTTP/1.1\r\nHost: x\r\nContent-Type: %s\r\n"
-                "Content-Length: %d\r\nConnection: close\r\n\r\n" % (tgt, ctype, len(body)))
+        head = ("POST %s HTTP/1.1\r\nHost: x\r\n%sContent-Type: %s\r\n"
+                "Content-Length: %d\r\nConnection: close\r\n\r\n" % (tgt, ck, ctype, len(body)))
     sent_full = True
     try:
         s.sendall(head.encode() + body)
@@ -199,10 +200,99 @@ def probe(fields, host, port, path, ssl, args):
         print('PROBE-CANARY|skipped|%s' % e)
     return sig
 
+def pubstate(fields, host, port, path, ssl, args):
+    """Chain tier: one ~1KB multipart POST carrying the configured progress
+    field (proven stock_rce R3 shape); the detector reports whether its own
+    progress entry was published in-request — the precondition the stock-config
+    lever (and our chains) run on. No dial-back, no ini, ~1KB on the wire."""
+    if fields.get('up_en') in ('0', "'0'", 'false', 'False'):
+        print('CHAIN|skipped|upload_progress disabled — lever door closed by config'); return 'IDLE'
+    name = fields.get('up_name') or 'PHP_SESSION_UPLOAD_PROGRESS'
+    if name == 'unset': name = 'PHP_SESSION_UPLOAD_PROGRESS'
+    sid = 'detectpspbstate%013d' % (os.getpid() % 10**13)   # [0-9a-v] only, 8.3 sid vetting
+    B = '----dps'
+    prog_field = ('--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\nps\r\n'
+                  '--%s\r\nContent-Disposition: form-data; name="file"; filename="w.bin"\r\n'
+                  'Content-Type: application/octet-stream\r\n\r\n' % (B, name, B)).encode()
+    # PACED, not instant: two compiled realities drive this shape —
+    # (a) min_freq defaults to 1 SECOND: a sub-second upload publishes no
+    #     progress entry (fact #450 lesson), so the drip must exceed ~1s;
+    # (b) stock rfc1867 engagement requires a known Content-Length > 0
+    #     (chunked=-1 doesn't engage the unpatched path), so no chunked
+    #     encoding: known length, body dribbled over the wire in drips.
+    tail = ('\r\n--%s--\r\n' % B).encode()
+    body = prog_field + b'A' * 1024 + tail
+    def drip(sock):
+        try:
+            n = len(body)
+            q = (n + 3) // 4
+            parts = (body[:q], body[q:2*q], body[2*q:3*q], body[3*q:])
+            for i, part in enumerate(parts):
+                if i: time.sleep(0.45)      # body completes at ~1.35s of flight:
+                sock.sendall(part)          # a min_freq=1s venue ticks its first publish
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+        return True
+    ctx = None
+    if ssl:
+        import ssl as _ssl
+        ctx = _ssl._create_unverified_context()
+    try:
+        s = socket.create_connection((host, port), timeout=args.timeout)
+        if ctx: s = ctx.wrap_socket(s, server_hostname=host)
+        tgt = ('%s?pubstate=1' % path)
+        s.sendall(("POST %s HTTP/1.1\r\nHost: x\r\nCookie: PHPSESSID=%s\r\n"
+                   "Content-Type: multipart/form-data; boundary=%s\r\n"
+                   "Content-Length: %d\r\nConnection: close\r\n\r\n"
+                   % (tgt, sid, B, len(body))).encode())
+        drip(s)
+        data = b''
+        try:
+            while True:
+                c = s.recv(65536)
+                if not c: break
+                data += c
+        except socket.timeout:
+            pass
+        s.close()
+    except OSError as e:
+        print('CHAIN|skipped|pubstate POST failed: %s' % e); return None
+    rbody = data.decode('utf-8', 'replace').split('\r\n\r\n', 1)[1] if b'\r\n\r\n' in data else ''
+    m = re.search(r'PUBSTATE\|cl=(\d+)\|pre=(\d)\|entry=(\S*?)\|sess=(\d+)\|gate=([01])', rbody)
+    if not m:
+        print('CHAIN|unknown|no PUBSTATE line in reply: %s' % rbody[:80].replace('\n', ' ')); return None
+    gate = m.group(5)
+    print('CHAIN-PUBSTATE|gate=%s|entry=%s|pre_start=%s|content_length=%s' % (gate, m.group(3), m.group(2), m.group(1)))
+    if gate == '0':
+        # Read-back arm: unpatched mod_php hides the parse-window entry from app
+        # time, but under cleanup=0 it survives in the session file (WP-oracle
+        # pattern). One ~1KB GET on the same sid.
+        try:
+            st2, rb2, _ = http_req(host, port, '%s?readstate=1' % path,
+                                   cookie='PHPSESSID=%s' % sid, timeout=args.timeout, ssl=ssl)
+            m2 = re.search(r'READSTATE\|entry=(\S*?)\|sess=\d+\|gate=([01])', rb2)
+            if m2:
+                print('CHAIN-READSTATE|gate=%s|entry=%s' % (m2.group(2), m2.group(1)))
+                if m2.group(2) == '1':
+                    return 'ARMED'
+        except OSError:
+            pass
+    if gate == '1':
+        return 'ARMED'
+    # Not observable in-request. Under a stock cleanup=1 regime the entry
+    # "lives and dies inside the parse window" (measured 10/21) — absence is
+    # NOT evidence the lever door is closed. Under cleanup=0 we gave the door
+    # every chance to show itself and it didn't: that reads as IDLE honestly.
+    cleanup = fields.get('up_cleanup', '')
+    if cleanup not in ('0', "'0'", 'false', 'False'):
+        return 'LIKELY'
+    return 'IDLE'
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--url', help='live venue: http(s)://host:port/path/detector.php')
     ap.add_argument('--probe', action='store_true', help='run the behavioral probe (HTTP venues)')
+    ap.add_argument('--no-chain', action='store_true', help='skip the pubstate chain tier (1KB POST, runs by default on --url venues)')
     ap.add_argument('--arm-mb', type=float, default=None, help='override arm body size (MB)')
     ap.add_argument('--arm-cap', type=int, default=48, help='skip probe if computed arm > this MB (default 48)')
     ap.add_argument('--php-bin', default=None, help='php binary for local mode')
@@ -237,6 +327,13 @@ def main():
     else:
         print('PROBE|not-run|pass --probe for the build-agnostic behavioral check')
 
+    chain = None
+    if not args.no_chain:
+        if args.url:
+            chain = pubstate(fields, host, port, path, ssl, args)
+        else:
+            print('CHAIN|not-run|the pubstate tier rides the venue parse window; needs --url')
+
     # combine: probe outranks lineage (that's the whole point of the probe)
     final, conf = verdict, 'lineage-only'
     if psig == 'FIXED-SIG':
@@ -249,14 +346,23 @@ def main():
         conf = 'lineage-only (probe skipped)'
 
     mitigated = 'door-closed-by-config' if up_en in ('0', "'0'", 'false', 'False', '') else ''
-    print('DETECT-VERDICT|verdict=%s|static=%s|probe=%s|confidence=%s|php=%s|sapi=%s%s' % (
-        final, verdict, psig or 'not-run', conf, fields.get('v', '?'), fields.get('sapi', '?'),
+    print('DETECT-VERDICT|verdict=%s|static=%s|probe=%s|confidence=%s|chain=%s|php=%s|sapi=%s%s' % (
+        final, verdict, psig or 'not-run', conf, chain or 'not-run',
+        fields.get('v', '?'), fields.get('sapi', '?'),
         ('|mitigation=' + mitigated) if mitigated else ''))
+    if chain == 'ARMED':
+        print('CHAIN-VERDICT|state=ARMED|basis=progress-entry-observed|note=stock-config lever precondition fires: our chains are armed on this venue (RCE leg stays app-sink-specific; frozen-counter forensics additionally needs cleanup=0)')
+    elif chain == 'LIKELY':
+        print('CHAIN-VERDICT|state=LIKELY|basis=door-open-unobservable|note=upload_progress enabled and venue accepts paced plants, but a stock cleanup=1 regime erases the progress entry inside the parse window (measured behavior) — lever door open, entry not observable; treat as chain-capable pending an in-window app sink check')
     for n in notes: print('NOTE|' + n)
 
-    if final in ('FIXED', 'NO-TRIGGER'): return 0
-    if final == 'VULN-EOL': return 2
-    if final == 'VULN': return 2
+    cve_vuln = final in ('VULN', 'VULN-EOL')
+    if chain == 'ARMED' or cve_vuln:
+        return 2
+    if final == 'INCONCLUSIVE':
+        return 3
+    if final in ('FIXED', 'NO-TRIGGER'):
+        return 0
     return 3
 
 if __name__ == '__main__':
