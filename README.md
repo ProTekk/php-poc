@@ -124,6 +124,20 @@ setarch -R php -S 0.0.0.0:18881 \
   -d session.save_path=/tmp/sess -d post_max_size=64M exploit/app.php
 ```
 
+## Oct 26 update (FPM, patched-latest)
+
+`stock_rce.py` **3/3 on `php:8.5.12-fpm` behind nginx** — official image, *no
+php.ini at all*, stock `cleanup=1`: dial-back RCE as `www-data`, `PUBSTATE=1
+RC=0`, banner-verified 8.5.12 NTS. The vendor's advisories demonstrated their
+exploits on mod_php; **no complete exploit had been demonstrated against FPM** —
+as of 2026-10-26 00:3x EDT, there's one, and it needs neither the OOM spray nor
+offsets. The SAPI nuance (in-flight frozen counter `frozen=YES` on patched FPM;
+the cross-request abandoned-upload artifact is prefork-native and on FPM wants
+`cleanup=0`) and the full receipts: `forensics/fpm-8512-2026-10-26.md`.
+Forward paths (distro tail / staleness-as-primitive / next venue):
+`forensics/paths-2026-10-26.md`. Staleness report remains **unfiled by owner's
+choice** — public repo, open credit.
+
 ## Caveats worth reading before sharing further
 
 - The staleness bug has **no bug report filed** with the PHP security team yet —
