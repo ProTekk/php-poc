@@ -56,7 +56,7 @@ $osfam = defined('PHP_OS_FAMILY') ? PHP_OS_FAMILY : PHP_OS;
 $zts   = defined('PHP_ZTS') ? (string)(int)PHP_ZTS : '0';  // constant is always defined; its VALUE is the flag
 
 $out = array();
-$out[] = 'PHP2SHELL_DETECT|v=' . PHP_VERSION . '|vid=' . PHP_VERSION_ID . '|mm=' . $mm
+$out[] = 'PHP2SHELL_DETECT|v=' . PHP_VERSION . '|cve=CVE-2026-109618/109619|vid=' . PHP_VERSION_ID . '|mm=' . $mm
        . '|floor=' . $floor . '|verdict=' . $verdict
        . '|sapi=' . php_sapi_name()
        . '|osfam=' . $osfam . '|zts=' . $zts

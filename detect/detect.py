@@ -11,6 +11,7 @@ Exit codes: 0 no findings, 2 vulnerable (CVE lineage OR chain ARMED),
 3 inconclusive, 4 unreachable/bad usage. stdlib only; Windows-safe (py -3).
 """
 import argparse, os, re, shutil, socket, subprocess, sys, time
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DET  = os.path.join(HERE, 'php2shell_detect.php')
@@ -419,7 +420,7 @@ def main():
         return c('[ %s ]' % text, col)
 
     print('')
-    print('%s %s' % (c('◆ PHP2Shell', BCYA), c(target, BOLD)))
+    print('%s %s' % (c('◆ PHP2Shell · CVE-2026-109618/109619', BCYA), c(target, BOLD)))
     print('%s %s' % (lab('  VERDICT  '), c(vword, vw_col) + ' — ' + vtail))
     cve_tag = {'VULN': tag('UNPATCHED', RED), 'VULN-EOL': tag('UNPATCHED · EOL', RED),
                'FIXED': tag('PATCHED', GRN), 'NO-TRIGGER': tag('N/A', GRN),
@@ -446,6 +447,9 @@ def main():
     for e in extras:
         print('  %s' % c('note: ' + e, DIM))
 
+    MLINES.insert(0, 'PHP2SHELL-REPORT|tool=php2shell_detect|cve=CVE-2026-109618,CVE-2026-109619'
+                     '|venue=%s|ts=%s' % ((host or 'local'),
+                                          datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')))
     logpath = write_log(args, host)
     if logpath:
         print('%s %s' % (lab('  details  '), c(logpath, DIM)))
