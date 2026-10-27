@@ -78,6 +78,7 @@ reach `python -c`'s parser — escapeshellarg passes backslashes literally.
 poc/forensics/   run.sh            the frozen-counter repro (~10s)
 poc/exploit/     run_exploit.sh    the staleness exploit chain
 poc/cve/         cve_driver.py     CVE trigger + patch-signature driver
+poc/rung/          rung_driver.py    sinkless dispatch proof (echo-only app)
 stock_rce.py     the pubstate staleness chain — stock config, mod_php + FPM venues
 php2shell.py     distro-tail census: --wp consumer-app probe mode (paced plant,
                  progress-name cycling, HTTP verdicts); AIO probe+arm+lever
@@ -135,6 +136,29 @@ binary — the bundle ships stock modes only since patched builds are host-speci
 The `shell leg` is a **gated harness execution check** (payload over connect-back
 socket, `RSHELL_LPORT` 4477); no 619-specific *consumer* effect was observed on our
 8.3 builds — the vendor's demonstrated 619 producers are 8.4/8.5-era.
+
+### rung — sinkless dispatch proof (2026-10-27)
+
+`probe_app.php` is an **echo-only** app (no `system`/`exec`/`eval`/
+`passthru`/`proc_open` sink in its source) that plants int keys plus a
+`Probe` object in the session — `__unserialize` and `__destruct` echo
+their firing. `rung_driver.py` starts its own `php -S` under `setarch -R`
+(harness ini, `RUNG_PORT` 18883), seeds R1, sprays to fire the frozen
+counter (R2), decodes and reports (R3); `RUNG_HOST=`/`RUNG_PORT=`/`PATHP=`
+drive a remote harness instead.
+
+```console
+$ python3 rung/rung_driver.py                   # local harness, seed sweep 1..5
+$ FLEN=228 FN=150 python3 rung/rung_driver.py   # spray-shape knobs
+```
+
+Verdict: the dispatch legs fire **5/5 on every venue tried** (distro
+8.3.6 `php -S` + Apache prefork, patched 8.3.36 vendor venue, 8.5.12
+mod_php) — the caller leg needs no execution sink. The freeze itself
+reproduces byte-identically on the sinkless app wherever `cleanup=0` +
+`min_freq=0` allow the chain; the dangling store landing on app-visible
+data is the **open rung** (0/40 on a quiet heap — self-reclaim absorbs
+it; placement arithmetic awaits the busy-heap venues).
 
 ## Remote harness (for `TARGET=`/`remote`)
 
